@@ -1,0 +1,11 @@
+fastapi==0.111.0
+uvicorn[standard]
+python-dotenv
+aiohttp
+pandas
+numpy
+onnxruntime
+shapely
+geojson
+supabase==2.4.1
+certifi

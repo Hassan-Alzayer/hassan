@@ -1,0 +1,17 @@
+create extension if not exists postgis;
+
+create table licences (
+    mmsi bigint primary key
+);
+
+create table iuu_alerts (
+    id bigserial primary key,
+    mmsi bigint,
+    ts timestamptz,
+    lat double precision,
+    lon double precision,
+    prob float,
+    geom geometry(point,4326) generated always as (st_setsrid(st_makepoint(lon,lat),4326)) stored
+);
+
+create index on iuu_alerts using gist(geom);

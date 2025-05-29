@@ -9,10 +9,13 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "maplibre-gl": "^5.5.0",
     "next": "15.3.2",
+    "ocean-wave": "file:",
     "postcss": "^8.5.3",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-map-gl": "^8.0.4"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

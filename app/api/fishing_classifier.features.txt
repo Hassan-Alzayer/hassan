@@ -1,0 +1,9 @@
+speed
+course
+distance_from_shore
+distance_from_port
+sin_hour
+cos_hour
+lat_bin
+lon_bin
+gear_type
