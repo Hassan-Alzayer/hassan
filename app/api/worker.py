@@ -1,128 +1,137 @@
-# app/api/worker.py
+# apps/api/worker.py  –  Poll GFW GET /v3/events ✅
 
-import os
-import ssl
-import certifi
-import asyncio
-import aiohttp
-import numpy as np
-import onnxruntime as ort
+import os, ssl, certifi, asyncio, aiohttp, socket
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from supabase import create_client
 from shapely.geometry import shape, Point
-from feature_builder import vectorize, FEATS
+import onnxruntime as ort
+from supabase import create_client
+from feature_builder import vectorize
 
 load_dotenv()
 
-# Build an SSL context once (using certifi’s trusted CAs)
-ssl_context = ssl.create_default_context(cafile=certifi.where())
-
-# Supabase client
-SUPA = create_client(
+# ──────────────────────────────────────────────────────────────
+# Globals
+# ──────────────────────────────────────────────────────────────
+ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+SUPA    = create_client(
     os.environ["SUPABASE_URL"],
     os.environ["SUPABASE_SERVICE_KEY"]
 )
 
-# ONNX model session
 sess = ort.InferenceSession("fishing_classifier.onnx")
-inp  = sess.get_inputs()[0].name
-out  = sess.get_outputs()[0].name
-THR  = 0.60   # probability threshold
+inp, out = sess.get_inputs()[0].name, sess.get_outputs()[0].name
+THR = 0.60
 
-# Cache for EEZ polygon
-EEZ = None
+API_BASE = "https://gateway.api.globalfishingwatch.org"
+EEZ = None  # only needed if you still want spatial filtering
 
+
+# ──────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────
 async def get_eez_polygon():
     global EEZ
-    if EEZ is not None:
+    if EEZ:
         return EEZ
 
-    mrgid  = os.environ["MRGID"]
-    wfs_url = "https://geo.vliz.be/geoserver/wfs"
+    url = "https://geo.vliz.be/geoserver/wfs"
     params = {
-        "request":      "GetFeature",
         "service":      "WFS",
+        "request":      "GetFeature",
         "version":      "1.1.0",
         "typename":     "MarineRegions:eez",
         "outputFormat": "application/json",
         "filter": (
-            f"<Filter>"
-              f"<PropertyIsEqualTo>"
-                f"<PropertyName>mrgid_eez</PropertyName>"
-                f"<Literal>{mrgid}</Literal>"
-              f"</PropertyIsEqualTo>"
-            f"</Filter>"
-        ),
+            f"<Filter><PropertyIsEqualTo>"
+            f"<PropertyName>mrgid_eez</PropertyName>"
+            f"<Literal>{os.getenv('MRGID')}</Literal>"
+            f"</PropertyIsEqualTo></Filter>"
+        )
     }
-
-    # NOW we’re inside async code—loop is running, so connector() works
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.get(wfs_url, params=params) as resp:
-            resp.raise_for_status()
-            gj = await resp.json()
-
-    EEZ = shape(gj["features"][0]["geometry"])
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(ssl=ssl_ctx, family=socket.AF_INET)
+    ) as s:
+        async with s.get(url, params=params) as r:
+            r.raise_for_status()
+            geo = (await r.json())["features"][0]["geometry"]
+            EEZ = shape(geo)
     return EEZ
 
-async def fetch_events(bbox, since):
-    url = "https://api.globalfishingwatch.org/v3/events"
+
+async def fetch_events(since: datetime, limit=5000, offset=0):
+    """
+    Pull *every* public fishing event in the window [since → now].
+    If you wanted to filter by a single vessel, you could add:
+       params["vessels[0]"] = "<SSVID-GUID>"
+    """
+    url = f"{API_BASE}/v3/events"
     params = {
-        "minLat": bbox[0],
-        "maxLat": bbox[1],
-        "minLon": bbox[2],
-        "maxLon": bbox[3],
-        "from":   since.isoformat() + "Z"
+        "datasets[0]": "public-global-fishing-events:latest",
+        "start-date":  since.date().isoformat(),
+        "end-date":    datetime.now(timezone.utc).date().isoformat(),
+        "limit":       limit,
+        "offset":      offset,
     }
-    headers = {"Authorization": f"Bearer {os.environ['GFW_TOKEN']}"}
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GFW_TOKEN')}",
+        "Accept":        "application/json",
+    }
 
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.get(url, params=params, headers=headers) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(ssl=ssl_ctx, family=socket.AF_INET)
+    ) as s:
+        async with s.get(url, params=params, headers=headers) as r:
+            if r.status >= 300:
+                text = await r.text()
+                raise RuntimeError(f"GFW {r.status}: {text}")
+            return await r.json()
 
-async def loop():
-    # e.g. BBOX="latMin,latMax,lonMin,lonMax"
-    bbox = list(map(float, os.environ["BBOX"].split(",")))
-    eez  = await get_eez_polygon()
+
+# ──────────────────────────────────────────────────────────────
+# Main loop
+# ──────────────────────────────────────────────────────────────
+async def main():
+    # optional: load EEZ if you still want to spatial-filter
+    eez = await get_eez_polygon()
 
     while True:
-        since = datetime.now(timezone.utc) - timedelta(minutes=15)
-        data  = await fetch_events(bbox, since)
+        since  = datetime.now(timezone.utc) - timedelta(minutes=15)
+        payload = await fetch_events(since)
+        print(f"[{datetime.now()}] fetched {payload['total']} events")
 
-        for ev in data.get("data", []):
-            pt = Point(ev["lon"], ev["lat"])
-            if not eez.contains(pt):
+        for ev in payload.get("entries", []):
+            lon = ev["position"]["lon"]
+            lat = ev["position"]["lat"]
+
+            # example spatial filter; remove if you want *all* events
+            if not eez.contains(Point(lon, lat)):
                 continue
 
-            # skip licensed vessels
-            lic = (
-                SUPA
-                .table("licences")
-                .select("mmsi")
-                .eq("mmsi", ev["vessel"]["mmsi"])
-                .execute()
-                .data
-            )
-            if lic:
+            ssvid = ev["vessel"]["ssvid"]
+            # skip already‐licensed
+            exists = SUPA.table("licences")\
+                        .select("mmsi")\
+                        .eq("mmsi", ssvid)\
+                        .execute().data
+            if exists:
                 continue
 
-            vec  = vectorize(ev)
-            prob = float(sess.run([out], {inp: vec[np.newaxis, :]})[0][0][0])
+            prob = float(sess.run([out], {inp: vectorize(ev)[None, :]})[0][0][0])
             if prob < THR:
                 continue
 
             SUPA.table("iuu_alerts").insert({
-                "mmsi": ev["vessel"]["mmsi"],
-                "ts":   datetime.utcfromtimestamp(ev["timestamp"]).isoformat(),
-                "lat":  ev["lat"],
-                "lon":  ev["lon"],
+                "mmsi": ssvid,
+                "ts":   ev["start"],
+                "lat":  lat,
+                "lon":  lon,
                 "prob": prob
             }).execute()
 
-        await asyncio.sleep(600)  # 10 minutes
+        # sleep before fetching the next window
+        await asyncio.sleep(600)
+
 
 if __name__ == "__main__":
-    asyncio.run(loop())
+    asyncio.run(main())
