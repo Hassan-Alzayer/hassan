@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "jszip": "^3.10.1",
     "maplibre-gl": "^5.5.0",
     "next": "15.3.2",
     "ocean-wave": "file:",
