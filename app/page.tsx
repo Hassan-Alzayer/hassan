@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import MapView, { Source, Layer, Popup } from 'react-map-gl/maplibre'
+import maplibreGl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import type { FeatureCollection, Feature, Point } from 'geojson'
 
@@ -41,7 +42,7 @@ export default function Home() {
   const [popupInfo, setPopupInfo] = useState<PopupInfo | null>(null)
 
   useEffect(() => {
-    ws.current = new WebSocket('ws://localhost:8000/ws')
+    ws.current = new WebSocket(`ws://${window.location.hostname}:8000/ws`)
     ws.current.onmessage = (e) => {
       try {
         setAlerts((prev) => [...prev, JSON.parse(e.data) as Alert])
@@ -158,13 +159,13 @@ export default function Home() {
       <MapView
         initialViewState={{ longitude: 43.5, latitude: 23.5, zoom: 5.5 }}
         interactive
-        mapLib={import('maplibre-gl')}
+        mapLib={maplibreGl}
         mapStyle="https://demotiles.maplibre.org/style.json"
         onClick={onClick}
         interactiveLayerIds={['saudi-vessels-layer', 'iuu-alerts-layer']}
       >
         {vesselsGeo && (
-          <Source id="saudi-vessels\" type="geojson\" data={vesselsGeo}>
+          <Source id="saudi-vessels" type="geojson" data={vesselsGeo}>
             <Layer
               id="saudi-vessels-layer"
               type="circle"
