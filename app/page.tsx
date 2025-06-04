@@ -8,22 +8,33 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import type { FeatureCollection, Feature, Point } from 'geojson'
 
 /* ─── Types ─── */
-type Alert = { id: number; mmsi: number; lat: number; lon: number; prob: number; ts: string }
-type SearchPayload = { entries: SearchEntry[]; since?: string | null }
-type SearchEntry = {
-  selfReportedInfo?: { id: string; ssvid: string }[]
-  combinedSourcesInfo?: { vesselId: string }[]
+type Alert = {
+  id: number
+  mmsi: number
+  lat: number
+  lon: number
+  prob: number
+  ts: string
 }
-type EventEntry = { position: { lon: number; lat: number }; vessel: { id: string } }
-type EventsPayload = { entries: EventEntry[]; nextOffset?: number }
+
+type EventEntry = {
+  position: { lon: number; lat: number }
+  vessel: { id: string; flag: string }
+}
+
+type EventsPayload = {
+  entries: EventEntry[]
+  nextOffset?: number
+}
 
 /* ─── ENV ─── */
 const TOKEN = process.env.NEXT_PUBLIC_GFW_TOKEN ?? ''
 
 export default function Home() {
-  /* IUU alerts (red) */
+  /* ─── IUU alerts (red) ─── */
   const [alerts, setAlerts] = useState<Alert[]>([])
   const ws = useRef<WebSocket | null>(null)
+
   useEffect(() => {
     ws.current = new WebSocket('ws://localhost:8000/ws')
     ws.current.onmessage = (e) => {
@@ -34,19 +45,18 @@ export default function Home() {
     return () => ws.current?.close()
   }, [])
 
-  const alertGeo: FeatureCollection<Point, { mmsi: number; prob: number }> = useMemo(
-    () => ({
+  const alertGeo: FeatureCollection<Point, { mmsi: number; prob: number }> = useMemo(() => {
+    return {
       type: 'FeatureCollection',
       features: alerts.map((a) => ({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [a.lon, a.lat] },
         properties: { mmsi: a.mmsi, prob: a.prob },
       })),
-    }),
-    [alerts],
-  )
+    }
+  }, [alerts])
 
-  /* Saudi vessels (blue) */
+  /* ─── Saudi “fishing events” (blue) ─── */
   const [vesselsGeo, setVesselsGeo] = useState<FeatureCollection<Point, { uuid: string }> | null>(null)
 
   useEffect(() => {
@@ -55,119 +65,89 @@ export default function Home() {
       return
     }
 
-    /* 1️⃣  Pull up to 1000 MMSI-403 vessels (pagination with `since`) */
-    const fetchAllUUIDs = async () => {
-      const uuids: string[] = []
-      let since: string | null | undefined = null
-      let pageCount = 0
-
-      do {
-        const q =
-          'https://gateway.api.globalfishingwatch.org/v3/vessels/search?' +
-          [
-            'datasets[0]=public-global-vessel-identity:latest',
-            'limit=50',
-            since ? `since=${encodeURIComponent(since)}` : '',
-            'where=' +
-              encodeURIComponent(
-                "(registryInfo.ssvid LIKE '403%' OR selfReportedInfo.ssvid LIKE '403%')",
-              ),
-          ]
-            .filter(Boolean)
-            .join('&')
-            
-        // Log the first 10 “search” URLs so you can copy/paste in Postman:
-        if (pageCount < 10) {
-          console.log(`[GFW-SEARCH Page ${pageCount + 1} URL]: ${q}`)
-        }
-        pageCount += 1
-
-        const resp = await fetch(q, { headers: { Authorization: `Bearer ${TOKEN}` } })
-        if (!resp.ok) throw new Error(`search failed ${resp.status}`)
-        const payload: SearchPayload = await resp.json()
-
-        payload.entries.forEach((e) => {
-          if (uuids.length < 10000) {
-            const id = e.combinedSourcesInfo?.[0]?.vesselId ?? e.selfReportedInfo?.[0]?.id
-            if (id) uuids.push(id)
-          }
-        })
-
-        since = payload.since
-      } while (since && uuids.length < 10000)
-      console.log(`fetched ${uuids.length} UUIDs`)
-      return uuids.slice(0, 10000)
-      
-    }
-
-    /* 2️⃣  Fetch fishing events (last 24 h) for those UUIDs */
-    const fetchLatestPositions = async (ids: string[]) => {
-      if (!ids.length) return []
-
-      const now = new Date()
-      const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
-      const baseParams = [
-        'datasets[0]=public-global-fishing-events:latest',
-        `start-date=${yesterday.toISOString().slice(0, 10)}`,
-        `end-date=${now.toISOString().slice(0, 10)}`,
-        'limit=1000',
-      ]
-
-      /*  <--  tweak: max 20 vessels per call  */
-      const chunkSize = 20
+    /**
+     * Instead of first paging through all vessels, we can directly ask:
+     *   “Give me all fishing events in the last 7 days, where the vessel’s flag = 'SAU'.”
+     *
+     * We will page in batches of 1000 events at a time (via offset), and stop when nextOffset is null.
+     * Any returned event tells us that vessel “id” (UUID) had fishing at that lat/lon.
+     */
+    const fetchSaudiFishingEvents = async (): Promise<Feature<Point, { uuid: string }>[]> => {
       const features: Feature<Point, { uuid: string }>[] = []
 
-      for (let i = 0; i < ids.length; i += chunkSize) {
-        const slice = ids.slice(i, i + chunkSize)
-        const vesselParams = slice.map((u, idx) => `vessels[${idx}]=${u}`)
-        let offset = 0
-        let more = false
+      // 1) Build date strings for a 7-day window (YYYY-MM-DD)
+      const now = new Date()
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+      const startDate = sevenDaysAgo.toISOString().slice(0, 10) // e.g. "2025-05-28"
+      const endDate = now.toISOString().slice(0, 10) // e.g. "2025-06-04"
 
-        do {
-          const url =
-            'https://gateway.api.globalfishingwatch.org/v3/events?' +
-            [
-              ...baseParams,
-              ...vesselParams,
-              /*  <--  omit offset when 0  */
-              `offset=${offset}`,   
-            ].join('&')
+      // 2) We'll request up to 1000 events per page, offset = 0, 1000, 2000, ...
+      let offset = 0
+      let pageCount = 0
+      let more = false
 
-          const r = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } })
-          if (!r.ok) throw new Error(`events fetch ${r.status}`)
-          const p: EventsPayload = await r.json()
+      do {
+        pageCount += 1
 
-          p.entries.forEach((ev) => {
-            // Log any fetched event positions to the console:
-            console.log(
-              `[GFW Event] Vessel=${ev.vessel.id}  lat=${ev.position.lat}  lon=${ev.position.lon}`,
-            )
+        // Build URL parameters:
+        //   - datasets[0]=public-global-fishing-events:latest
+        //   - start-date=<7-days-ago>
+        //   - end-date=<today>
+        //   - flags[0]=SAU       (only Saudi-flagged vessels)
+        //   - limit=1000
+        //   - offset=<offset>
+        //
+        // In a single GET request, we can simply put these in the query string:
+        const params = [
+          'datasets[0]=public-global-fishing-events:latest',
+          `start-date=${startDate}`,
+          `end-date=${endDate}`,
+          'flags[0]=SAU',   // <-- only “SAU”
+          'limit=1000',
+          `offset=${offset}`,
+        ].join('&')
 
-            features.push({
-              type: 'Feature',
-              geometry: { type: 'Point', coordinates: [ev.position.lon, ev.position.lat] },
-              properties: { uuid: ev.vessel.id },
-            })
+        const url = `https://gateway.api.globalfishingwatch.org/v3/events?${params}`
+
+        // 3) Fetch this page
+        const resp = await fetch(url, {
+          headers: { Authorization: `Bearer ${TOKEN}` },
+        })
+        if (!resp.ok) throw new Error(`events fetch failed ${resp.status}`)
+
+        const payload: EventsPayload = await resp.json()
+
+        // 4) If this page returned any entries, log how many:
+        if (payload.entries.length > 0) {
+          console.log(
+            `[GFW] Page ${pageCount}: fetched ${payload.entries.length} Saudi fishing events (offset=${offset})`
+          )
+        } else {
+          console.log(`[GFW] Page ${pageCount}: no events (offset=${offset})`)
+        }
+
+        // 5) Convert each event into a GeoJSON Feature
+        payload.entries.forEach((ev) => {
+          features.push({
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [ev.position.lon, ev.position.lat] },
+            properties: { uuid: ev.vessel.id },
           })
+        })
 
-          offset = p.nextOffset ?? -1
-          more = offset >= 0
-        } while (more)
-      }
+        // 6) Advance offset. If nextOffset is null or undefined, we stop.
+        offset = payload.nextOffset ?? -1
+        more = offset >= 0
+      } while (more)
 
-      // After collecting all features, log how many we found:
-      console.log(`[GFW] Total event‐features fetched: ${features.length}`)
-
+      console.log(`[GFW] Total Saudi fishing‐events fetched: ${features.length}`)
       return features
     }
 
-    /* orchestrate */
+    /* Orchestrate: call fetchSaudiFishingEvents(), set state */
     ;(async () => {
       try {
-        const uuids = await fetchAllUUIDs()
-        console.log(`[GFW] Collected UUIDs: ${uuids.length}`) // should be up to 10 000
-
-        const feats = await fetchLatestPositions(uuids)
+        const feats = await fetchSaudiFishingEvents()
         setVesselsGeo({ type: 'FeatureCollection', features: feats })
       } catch (err) {
         console.error(err)
@@ -175,7 +155,7 @@ export default function Home() {
     })()
   }, [])
 
-  /* ─── Map ─── */
+  /* ─── Render the Map ─── */
   return (
     <div className="h-screen">
       <MapView
