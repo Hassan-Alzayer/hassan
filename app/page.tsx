@@ -1,9 +1,7 @@
-// File: app/page.tsx
-// ------------------------------
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import MapView, { Source, Layer } from 'react-map-gl/maplibre'
+import MapView, { Source, Layer, Popup } from 'react-map-gl/maplibre'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import type { FeatureCollection, Feature, Point } from 'geojson'
 
@@ -19,12 +17,18 @@ type Alert = {
 
 type EventEntry = {
   position: { lon: number; lat: number }
-  vessel: { id: string; flag: string }
+  vessel: { id: string; flag: string; name?: string }
 }
 
 type EventsPayload = {
   entries: EventEntry[]
   nextOffset?: number
+}
+
+type PopupInfo = {
+  longitude: number
+  latitude: number
+  vesselName: string
 }
 
 /* ─── ENV ─── */
@@ -34,6 +38,7 @@ export default function Home() {
   /* ─── IUU alerts (red) ─── */
   const [alerts, setAlerts] = useState<Alert[]>([])
   const ws = useRef<WebSocket | null>(null)
+  const [popupInfo, setPopupInfo] = useState<PopupInfo | null>(null)
 
   useEffect(() => {
     ws.current = new WebSocket('ws://localhost:8000/ws')
@@ -56,8 +61,8 @@ export default function Home() {
     }
   }, [alerts])
 
-  /* ─── Saudi “fishing events” (blue) ─── */
-  const [vesselsGeo, setVesselsGeo] = useState<FeatureCollection<Point, { uuid: string }> | null>(null)
+  /* ─── Saudi "fishing events" (blue) ─── */
+  const [vesselsGeo, setVesselsGeo] = useState<FeatureCollection<Point, { uuid: string; vesselName: string }> | null>(null)
 
   useEffect(() => {
     if (!TOKEN) {
@@ -65,23 +70,14 @@ export default function Home() {
       return
     }
 
-    /**
-     * Instead of first paging through all vessels, we can directly ask:
-     *   “Give me all fishing events in the last 7 days, where the vessel’s flag = 'SAU'.”
-     *
-     * We will page in batches of 1000 events at a time (via offset), and stop when nextOffset is null.
-     * Any returned event tells us that vessel “id” (UUID) had fishing at that lat/lon.
-     */
-    const fetchSaudiFishingEvents = async (): Promise<Feature<Point, { uuid: string }>[]> => {
-      const features: Feature<Point, { uuid: string }>[] = []
+    const fetchSaudiFishingEvents = async (): Promise<Feature<Point, { uuid: string; vesselName: string }>[]> => {
+      const features: Feature<Point, { uuid: string; vesselName: string }>[] = []
 
-      // 1) Build date strings for a 7-day window (YYYY-MM-DD)
       const now = new Date()
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-      const startDate = sevenDaysAgo.toISOString().slice(0, 10) // e.g. "2025-05-28"
-      const endDate = now.toISOString().slice(0, 10) // e.g. "2025-06-04"
+      const startDate = sevenDaysAgo.toISOString().slice(0, 10)
+      const endDate = now.toISOString().slice(0, 10)
 
-      // 2) We'll request up to 1000 events per page, offset = 0, 1000, 2000, ...
       let offset = 0
       let pageCount = 0
       let more = false
@@ -89,27 +85,17 @@ export default function Home() {
       do {
         pageCount += 1
 
-        // Build URL parameters:
-        //   - datasets[0]=public-global-fishing-events:latest
-        //   - start-date=<7-days-ago>
-        //   - end-date=<today>
-        //   - flags[0]=SAU       (only Saudi-flagged vessels)
-        //   - limit=1000
-        //   - offset=<offset>
-        //
-        // In a single GET request, we can simply put these in the query string:
         const params = [
           'datasets[0]=public-global-fishing-events:latest',
           `start-date=${startDate}`,
           `end-date=${endDate}`,
-          'flags[0]=SAU',   // <-- only “SAU”
+          'flags[0]=SAU',
           'limit=1000',
           `offset=${offset}`,
         ].join('&')
 
         const url = `https://gateway.api.globalfishingwatch.org/v3/events?${params}`
 
-        // 3) Fetch this page
         const resp = await fetch(url, {
           headers: { Authorization: `Bearer ${TOKEN}` },
         })
@@ -117,7 +103,6 @@ export default function Home() {
 
         const payload: EventsPayload = await resp.json()
 
-        // 4) If this page returned any entries, log how many:
         if (payload.entries.length > 0) {
           console.log(
             `[GFW] Page ${pageCount}: fetched ${payload.entries.length} Saudi fishing events (offset=${offset})`
@@ -126,16 +111,17 @@ export default function Home() {
           console.log(`[GFW] Page ${pageCount}: no events (offset=${offset})`)
         }
 
-        // 5) Convert each event into a GeoJSON Feature
         payload.entries.forEach((ev) => {
           features.push({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [ev.position.lon, ev.position.lat] },
-            properties: { uuid: ev.vessel.id },
+            properties: { 
+              uuid: ev.vessel.id,
+              vesselName: ev.vessel.name || 'Unknown Vessel'
+            },
           })
         })
 
-        // 6) Advance offset. If nextOffset is null or undefined, we stop.
         offset = payload.nextOffset ?? -1
         more = offset >= 0
       } while (more)
@@ -144,7 +130,6 @@ export default function Home() {
       return features
     }
 
-    /* Orchestrate: call fetchSaudiFishingEvents(), set state */
     ;(async () => {
       try {
         const feats = await fetchSaudiFishingEvents()
@@ -155,6 +140,18 @@ export default function Home() {
     })()
   }, [])
 
+  /* ─── Handle Click Events ─── */
+  const onClick = (event: any) => {
+    const feature = event.features?.[0]
+    if (feature) {
+      setPopupInfo({
+        longitude: feature.geometry.coordinates[0],
+        latitude: feature.geometry.coordinates[1],
+        vesselName: feature.properties.vesselName || `MMSI: ${feature.properties.mmsi}`
+      })
+    }
+  }
+
   /* ─── Render the Map ─── */
   return (
     <div className="h-screen">
@@ -163,6 +160,8 @@ export default function Home() {
         interactive
         mapLib={import('maplibre-gl')}
         mapStyle="https://demotiles.maplibre.org/style.json"
+        onClick={onClick}
+        interactiveLayerIds={['saudi-vessels-layer', 'iuu-alerts-layer']}
       >
         {vesselsGeo && (
           <Source id="saudi-vessels" type="geojson" data={vesselsGeo}>
@@ -191,6 +190,19 @@ export default function Home() {
             }}
           />
         </Source>
+
+        {popupInfo && (
+          <Popup
+            longitude={popupInfo.longitude}
+            latitude={popupInfo.latitude}
+            onClose={() => setPopupInfo(null)}
+            closeButton={true}
+          >
+            <div className="p-2">
+              <h3 className="font-bold">{popupInfo.vesselName}</h3>
+            </div>
+          </Popup>
+        )}
       </MapView>
     </div>
   )
