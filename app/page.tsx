@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import MapView, { Source, Layer } from 'react-map-gl/maplibre'
+import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import type { FeatureCollection, Feature, Point } from 'geojson'
 
@@ -160,11 +161,11 @@ export default function Home() {
       <MapView
         initialViewState={{ longitude: 43.5, latitude: 23.5, zoom: 5.5 }}
         interactive
-        mapLib={import('maplibre-gl')}
+        mapLib={maplibregl}
         mapStyle="https://demotiles.maplibre.org/style.json"
       >
         {vesselsGeo && (
-          <Source id="saudi-vessels\" type="geojson\" data={vesselsGeo}>
+          <Source id="saudi-vessels" type="geojson" data={vesselsGeo}>
             <Layer
               id="saudi-vessels-layer"
               type="circle"
