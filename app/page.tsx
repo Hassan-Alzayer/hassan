@@ -165,7 +165,7 @@ export default function Home() {
         interactiveLayerIds={['saudi-vessels-layer', 'iuu-alerts-layer']}
       >
         {vesselsGeo && (
-          <Source id="saudi-vessels" type="geojson" data={vesselsGeo}>
+          <Source id="saudi-vessels\" type="geojson\" data={vesselsGeo}>
             <Layer
               id="saudi-vessels-layer"
               type="circle"
