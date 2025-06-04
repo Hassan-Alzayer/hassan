@@ -59,6 +59,7 @@ export default function Home() {
     const fetchAllUUIDs = async () => {
       const uuids: string[] = []
       let since: string | null | undefined = null
+      let pageCount = 0
 
       do {
         const q =
@@ -74,6 +75,12 @@ export default function Home() {
           ]
             .filter(Boolean)
             .join('&')
+            
+        // Log the first 10 “search” URLs so you can copy/paste in Postman:
+        if (pageCount < 10) {
+          console.log(`[GFW-SEARCH Page ${pageCount + 1} URL]: ${q}`)
+        }
+        pageCount += 1
 
         const resp = await fetch(q, { headers: { Authorization: `Bearer ${TOKEN}` } })
         if (!resp.ok) throw new Error(`search failed ${resp.status}`)
