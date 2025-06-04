@@ -165,7 +165,7 @@ export default function Home() {
         mapStyle="https://demotiles.maplibre.org/style.json"
       >
         {vesselsGeo && (
-          <Source id="saudi-vessels" type="geojson" data={vesselsGeo}>
+          <Source id="saudi-vessels\" type="geojson\" data={vesselsGeo}>
             <Layer
               id="saudi-vessels-layer"
               type="circle"
