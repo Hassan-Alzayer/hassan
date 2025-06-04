@@ -27,10 +27,13 @@ export default function Home() {
   useEffect(() => {
     ws.current = new WebSocket('ws://localhost:8000/ws')
     ws.current.onmessage = (e) => {
-      try { setAlerts((p) => [...p, JSON.parse(e.data) as Alert]) } catch {}
+      try {
+        setAlerts((prev) => [...prev, JSON.parse(e.data) as Alert])
+      } catch {}
     }
     return () => ws.current?.close()
   }, [])
+
   const alertGeo: FeatureCollection<Point, { mmsi: number; prob: number }> = useMemo(
     () => ({
       type: 'FeatureCollection',
@@ -47,9 +50,12 @@ export default function Home() {
   const [vesselsGeo, setVesselsGeo] = useState<FeatureCollection<Point, { uuid: string }> | null>(null)
 
   useEffect(() => {
-    if (!TOKEN) { console.error('NEXT_PUBLIC_GFW_TOKEN missing'); return }
+    if (!TOKEN) {
+      console.error('NEXT_PUBLIC_GFW_TOKEN missing')
+      return
+    }
 
-    /* 1️⃣  Pull *all* MMSI-403 vessels (pagination with `since`) */
+    /* 1️⃣  Pull up to 1000 MMSI-403 vessels (pagination with `since`) */
     const fetchAllUUIDs = async () => {
       const uuids: string[] = []
       let since: string | null | undefined = null
@@ -74,13 +80,17 @@ export default function Home() {
         const payload: SearchPayload = await resp.json()
 
         payload.entries.forEach((e) => {
-          const id = e.combinedSourcesInfo?.[0]?.vesselId ?? e.selfReportedInfo?.[0]?.id
-          if (id) uuids.push(id)
+          if (uuids.length < 10000) {
+            const id = e.combinedSourcesInfo?.[0]?.vesselId ?? e.selfReportedInfo?.[0]?.id
+            if (id) uuids.push(id)
+          }
         })
-        since = payload.since
-      } while (since)
 
-      return uuids
+        since = payload.since
+      } while (since && uuids.length < 10000)
+      console.log(`fetched ${uuids.length} UUIDs`)
+      return uuids.slice(0, 10000)
+      
     }
 
     /* 2️⃣  Fetch fishing events (last 24 h) for those UUIDs */
@@ -96,7 +106,7 @@ export default function Home() {
         'limit=1000',
       ]
 
-      /*  <--  tweak 1: max 20 vessels per call  */
+      /*  <--  tweak: max 20 vessels per call  */
       const chunkSize = 20
       const features: Feature<Point, { uuid: string }>[] = []
 
@@ -104,15 +114,16 @@ export default function Home() {
         const slice = ids.slice(i, i + chunkSize)
         const vesselParams = slice.map((u, idx) => `vessels[${idx}]=${u}`)
         let offset = 0
-        let more  = false
+        let more = false
+
         do {
           const url =
             'https://gateway.api.globalfishingwatch.org/v3/events?' +
             [
               ...baseParams,
               ...vesselParams,
-              /*  <--  tweak 2: omit offset when 0  */
-              ...(offset ? [`offset=${offset}`] : []),
+              /*  <--  omit offset when 0  */
+              `offset=${offset}`,   
             ].join('&')
 
           const r = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } })
@@ -120,6 +131,11 @@ export default function Home() {
           const p: EventsPayload = await r.json()
 
           p.entries.forEach((ev) => {
+            // Log any fetched event positions to the console:
+            console.log(
+              `[GFW Event] Vessel=${ev.vessel.id}  lat=${ev.position.lat}  lon=${ev.position.lon}`,
+            )
+
             features.push({
               type: 'Feature',
               geometry: { type: 'Point', coordinates: [ev.position.lon, ev.position.lat] },
@@ -128,9 +144,13 @@ export default function Home() {
           })
 
           offset = p.nextOffset ?? -1
-          more   = offset >= 0
+          more = offset >= 0
         } while (more)
       }
+
+      // After collecting all features, log how many we found:
+      console.log(`[GFW] Total event‐features fetched: ${features.length}`)
+
       return features
     }
 
@@ -138,6 +158,8 @@ export default function Home() {
     ;(async () => {
       try {
         const uuids = await fetchAllUUIDs()
+        console.log(`[GFW] Collected UUIDs: ${uuids.length}`) // should be up to 10 000
+
         const feats = await fetchLatestPositions(uuids)
         setVesselsGeo({ type: 'FeatureCollection', features: feats })
       } catch (err) {
