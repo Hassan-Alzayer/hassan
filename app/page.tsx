@@ -1,5 +1,3 @@
-// File: app/page.tsx
-// ------------------------------
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -36,7 +34,8 @@ export default function Home() {
   const ws = useRef<WebSocket | null>(null)
 
   useEffect(() => {
-    ws.current = new WebSocket('ws://localhost:8000/ws')
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    ws.current = new WebSocket(`${protocol}//${window.location.hostname}:8000/ws`)
     ws.current.onmessage = (e) => {
       try {
         setAlerts((prev) => [...prev, JSON.parse(e.data) as Alert])
@@ -56,7 +55,7 @@ export default function Home() {
     }
   }, [alerts])
 
-  /* ─── Saudi “fishing events” (blue) ─── */
+  /* ─── Saudi "fishing events" (blue) ─── */
   const [vesselsGeo, setVesselsGeo] = useState<FeatureCollection<Point, { uuid: string }> | null>(null)
 
   useEffect(() => {
@@ -67,10 +66,10 @@ export default function Home() {
 
     /**
      * Instead of first paging through all vessels, we can directly ask:
-     *   “Give me all fishing events in the last 7 days, where the vessel’s flag = 'SAU'.”
+     *   "Give me all fishing events in the last 7 days, where the vessel's flag = 'SAU'."
      *
      * We will page in batches of 1000 events at a time (via offset), and stop when nextOffset is null.
-     * Any returned event tells us that vessel “id” (UUID) had fishing at that lat/lon.
+     * Any returned event tells us that vessel "id" (UUID) had fishing at that lat/lon.
      */
     const fetchSaudiFishingEvents = async (): Promise<Feature<Point, { uuid: string }>[]> => {
       const features: Feature<Point, { uuid: string }>[] = []
@@ -102,7 +101,7 @@ export default function Home() {
           'datasets[0]=public-global-fishing-events:latest',
           `start-date=${startDate}`,
           `end-date=${endDate}`,
-          'flags[0]=SAU',   // <-- only “SAU”
+          'flags[0]=SAU',   // <-- only "SAU"
           'limit=1000',
           `offset=${offset}`,
         ].join('&')
