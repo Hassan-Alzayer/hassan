@@ -33,9 +33,9 @@ export default function Home() {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const ws = useRef<WebSocket | null>(null)
 
-  useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    ws.current = new WebSocket(`${protocol}//${window.location.hostname}:8000/ws`)
+ useEffect(() => {Add commentMore actions
+    ws.current = new WebSocket('ws://localhost:8000/ws')
+
     ws.current.onmessage = (e) => {
       try {
         setAlerts((prev) => [...prev, JSON.parse(e.data) as Alert])
